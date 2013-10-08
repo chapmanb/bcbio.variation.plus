@@ -1,9 +1,11 @@
 (ns bcbio.variation.plus
   "Main namespace for exposing command line based functionality in bcbio.variation.plus version"
-  (:require [bcbio.variation.sv.csv]))
+  (:require [bcbio.variation.summary.population]
+            [bcbio.variation.sv.csv]))
 
 (def ^{:private true} progs
-  {:sv-to-csv 'bcbio.variation.sv.csv})
+  {:sv-to-csv 'bcbio.variation.sv.csv
+   :pop-summary 'bcbio.variation.summary.population})
 
 (defn -main [& args]
   (if-let [to-run-ns (get progs (keyword (first args)))]
