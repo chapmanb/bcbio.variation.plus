@@ -37,8 +37,8 @@
                               (assoc (keyword (str (name x) "-pct"))
                                      (format "%.1f" (* 100.0 (/ count total)))))))
                       {:treatment treat} [:HOM_REF :HET :HOM_VAR])))]
-    (print (doric/table [:treatment :HOM_REF :HOM_REF-pct :HET :HET-pct :HOM_VAR :HOM_VAR-pct]
-                        (map (partial summarize-treat calls-by-treatment) (keys calls-by-treatment))))))
+    (println (doric/table [:treatment :HOM_REF :HOM_REF-pct :HET :HET-pct :HOM_VAR :HOM_VAR-pct]
+                          (map (partial summarize-treat calls-by-treatment) (sort (keys calls-by-treatment)))))))
 
 (defn call-metrics
   "Calculate overall summary call metrics for an input VCF file."
@@ -52,15 +52,20 @@
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
            print-metrics))))
 
+(defn- call-metrics-many
+  [config-file ref-file & vcf-files]
+  (doseq [vcf-file vcf-files]
+    (call-metrics vcf-file ref-file config-file)))
+
 (defn -main
   [& args]
-  (if (= (count args) 3)
-    (apply call-metrics args)
+  (if (>= (count args) 3)
+    (apply call-metrics-many args)
     (do
       (println "Usage:")
-      (println "  pop-summary <vcf-file> <ref-file> <config-file>"))))
+      (println "  pop-summary <config-file> <ref-file> <vcf-files>"))))
 
-(defn- test
+(defn- tester
   []
   (let [ref-file "/usr/local/share/bcbio_nextgen/genomes/mm10/seq/mm10.fa"
         config-file "/home/chapmanb/tmp/vcf/mouse/drme-pilot.yaml"
