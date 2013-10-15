@@ -18,6 +18,11 @@
   [vc]
   (not (contains? (set (map :type (:genotypes vc))) "NO_CALL")))
 
+(defn- has-min-depth?
+  "Ensure all samples have at least 12x coverage for calling heterozygotes."
+  [vc]
+  (every? #(>= % 12) (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
+
 (defn- vc-treatment-calls
   "Summarize calls by treatment for a variant context."
   [samples orig-coll vc]
@@ -34,10 +39,10 @@
                         (let [count (get-in calls-by-treatment [treat x] 0)]
                           (-> coll
                               (assoc x count)
-                              (assoc (keyword (str (name x) "-pct"))
+                              (assoc (keyword (str (name x) "-%"))
                                      (format "%.1f" (* 100.0 (/ count total)))))))
                       {:treatment treat} [:HOM_REF :HET :HOM_VAR])))]
-    (println (doric/table [:treatment :HOM_REF :HOM_REF-pct :HET :HET-pct :HOM_VAR :HOM_VAR-pct]
+    (println (doric/table [:treatment :HOM_REF :HOM_REF-% :HET :HET-% :HOM_VAR :HOM_VAR-%]
                           (map (partial summarize-treat calls-by-treatment) (sort (keys calls-by-treatment)))))))
 
 (defn call-metrics
@@ -48,7 +53,7 @@
         samples (select-keys (get-sample-treatments config-file) sample-names)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
-           (filter passes-call-rate?)
+           (filter has-min-depth?)
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
            print-metrics))))
 
