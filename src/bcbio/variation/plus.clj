@@ -1,7 +1,8 @@
 (ns bcbio.variation.plus
   "Main namespace for exposing command line based functionality in bcbio.variation.plus version"
   (:require [bcbio.variation.summary.population]
-            [bcbio.variation.sv.csv]))
+            [bcbio.variation.sv.csv])
+  (:gen-class))
 
 (def ^{:private true} progs
   {:sv-to-csv 'bcbio.variation.sv.csv

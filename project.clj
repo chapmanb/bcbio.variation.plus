@@ -10,4 +10,5 @@
   :plugins [[lein-midje "3.0.1"]]
   :profiles {:dev {:dependencies
                    [[midje "1.5.1" :exclusions [org.clojure/clojure ordered]]]}}
+  :aot [bcbio.variation.plus]
   :main bcbio.variation.plus)
