@@ -1,6 +1,8 @@
 (ns bcbio.variation.summary.population
   "Summarize variant metrics and extract useful variants for batch called populations."
-  (:require [clj-yaml.core :as yaml]
+  (:require [clojure.string :as string]
+            [clj-yaml.core :as yaml]
+            [criterium.stats :as stats]
             [doric.core :as doric]
             [me.raynes.fs :as fs]
             [bcbio.variation.variantcontext :as gvc]))
@@ -16,6 +18,75 @@
   "Ensure all samples have at least 12x coverage for calling heterozygotes."
   [vc]
   (every? #(>= % 12) (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
+
+;; ## Localize variants per gene
+
+(defn- vc->gene-names
+  "Extract gene names and sizes from snpEff annotation of variant effects.."
+  [vc]
+  (letfn [(eff->gene-name [eff]
+            (let [parts (-> eff
+                            (string/split #"\(")
+                            second
+                            (string/split #"\|"))
+                  size (nth parts 4)]
+              (when-not (empty? size)
+                {:name (nth parts 5) :size (* 3 (Integer/parseInt size))})))]
+    (reduce (fn [coll g]
+              (if g
+                (assoc coll (:name g) (:size g))
+                coll))
+            {} (map eff->gene-name
+                    (let [a (get-in vc [:attributes "EFF"])]
+                      (if (string? a) [a] a))))))
+
+(defn- update-gene-count
+  "Extract gene names effected by variant and update count."
+  [orig-coll vc]
+  (reduce (fn [coll [g size]]
+            (assoc coll g
+                   (update-in (get coll g {:count 0 :size size}) [:count] inc)))
+          orig-coll (vc->gene-names vc)))
+
+(defn- get-top-genes
+  "Retrieve the top genes with large numbers of mutations, looking for outliers."
+  [gcounts]
+  (let [counts (sort > (map second gcounts))
+        thresh (stats/quantile 0.20 counts)]
+    (->> gcounts
+         (sort-by second >)
+         (take-while #(> (second %) thresh))
+         (into {}))))
+
+(defn- normalize-counts
+  "Normalize variant counts by gene size"
+  [gcounts]
+  (reduce (fn [coll [g c]]
+            (assoc coll g (/ (:count c) (:size c))))
+          {} gcounts))
+
+(defn- low-count?
+  [[_ g]]
+  (< (:count g) 5))
+
+(defn highly-mutated-genes
+  "Identify genes with large numbers of mutations for filtering purposes."
+  [vcf-file ref-file config-file]
+  (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
+    (->> (gvc/parse-vcf vcf-iter)
+           (filter has-min-depth?)
+           (reduce update-gene-count {})
+           (remove low-count?)
+           normalize-counts
+           get-top-genes)))
+
+(defn check-highly-mutated
+  "Generate predicate function to identify variants in highly mutated genes."
+  [vcf-file ref-file config-file]
+  (let [high-genes (highly-mutated-genes vcf-file ref-file config-file)]
+    (fn [vc]
+      (some (fn [[k v]] (contains? high-genes k))
+            (vc->gene-names vc)))))
 
 ;; ## Organize samples and treatments
 
@@ -44,29 +115,34 @@
           orig-coll (:genotypes vc)))
 
 (defn- print-metrics
-  [calls-by-treatment]
+  [samples calls-by-treatment]
   (letfn [(summarize-treat [calls-by-treatment treat]
-            (let [total (apply + (vals (get calls-by-treatment treat)))]
+            (let [total (apply + (vals (get calls-by-treatment treat)))
+                  treat-samples (reduce (fn [coll [k v]]
+                                          (assoc coll v (conj (get coll v []) k)))
+                                        {} samples)
+                  treat-str (format "%s (%s)" treat (count (get treat-samples treat)))]
               (reduce (fn [coll x]
                         (let [count (get-in calls-by-treatment [treat x] 0)]
                           (-> coll
                               (assoc x count)
                               (assoc (keyword (str (name x) "-%"))
                                      (format "%.1f" (* 100.0 (/ count total)))))))
-                      {:treatment treat} [:HOM_REF :HET :HOM_VAR])))]
+                      {:treatment treat-str} [:HOM_REF :HET :HOM_VAR])))]
     (println (doric/table [:treatment :HOM_REF :HOM_REF-% :HET :HET-% :HOM_VAR :HOM_VAR-%]
                           (map (partial summarize-treat calls-by-treatment) (sort (keys calls-by-treatment)))))))
 
 (defn call-metrics
   "Calculate overall summary call metrics for an input VCF file."
-  [vcf-file ref-file config-file]
+  [vcf-file ref-file config-file is-high-gene?]
   (println "**" (fs/base-name vcf-file))
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
            (filter has-min-depth?)
+           (remove is-high-gene?)
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
-           print-metrics))))
+           (print-metrics samples)))))
 
 ;; ## Evaluate replicate consistency
 
@@ -83,30 +159,36 @@
             orig-coll calls-by-treat)))
 
 (defn- print-consistency
-  [summary]
-  (doseq [treat (sort (keys summary))]
-    (println "***" treat)
-    (let [total (apply + (vals (get summary treat)))]
-      (doseq [con-type (sort (keys (get summary treat)))]
-        (let [cur-count (get-in summary [treat con-type])]
-          (println (format " - %s %s %.1f%%" (name con-type) cur-count
-                           (* 100.0 (/ cur-count total)))))))))
+  [samples summary]
+  (let [treat-samples (reduce (fn [coll [k v]]
+                                (assoc coll v (conj (get coll v []) k)))
+                              {} samples)]
+    (doseq [treat (sort (keys summary))]
+      (println "***" treat (count (get treat-samples treat)))
+      (let [total (apply + (vals (get summary treat)))]
+        (doseq [con-type (sort (keys (get summary treat)))]
+          (let [cur-count (get-in summary [treat con-type])]
+            (println (format " - %s %s %.1f%%" (name con-type) cur-count
+                             (* 100.0 (/ cur-count total))))))))))
 
 (defn consistency-metrics
   "Calculate metrics of consistency of calls amongst replicates."
-  [vcf-file ref-file config-file]
+  [vcf-file ref-file config-file is-high-gene?]
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
            (filter has-min-depth?)
+           (remove is-high-gene?)
            (reduce (partial evalute-consistency samples) {})
-           print-consistency))))
+           (print-consistency samples)))))
 
 (defn- call-metrics-many
   [config-file ref-file & vcf-files]
   (doseq [vcf-file vcf-files]
-    (call-metrics vcf-file ref-file config-file)
-    (consistency-metrics vcf-file ref-file config-file)))
+    (let [is-high-gene? (check-highly-mutated vcf-file ref-file config-file)]
+      (call-metrics vcf-file ref-file config-file is-high-gene?)
+      (consistency-metrics vcf-file ref-file config-file is-high-gene?)
+      )))
 
 (defn -main
   [& args]

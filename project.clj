@@ -7,6 +7,7 @@
                  ;; GATK dependencies
                  [it.unimi.dsi/fastutil "6.5.3"]
                  ]
+  :jvm-opts ["-Xms750m" "-Xmx2g"]
   :plugins [[lein-midje "3.0.1"]]
   :profiles {:dev {:dependencies
                    [[midje "1.5.1" :exclusions [org.clojure/clojure ordered]]]}}
