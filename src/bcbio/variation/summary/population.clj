@@ -1,10 +1,13 @@
 (ns bcbio.variation.summary.population
   "Summarize variant metrics and extract useful variants for batch called populations."
-  (:require [clojure.string :as string]
+  (:require [clojure.data.csv :as csv]
+            [clojure.java.io :as io]
+            [clojure.string :as string]
             [clj-yaml.core :as yaml]
             [criterium.stats :as stats]
             [doric.core :as doric]
             [me.raynes.fs :as fs]
+            [bcbio.run.itx :as itx]
             [bcbio.variation.variantcontext :as gvc]))
 
 ;; ## Filtering
@@ -19,26 +22,51 @@
   [vc]
   (every? #(>= % 12) (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
 
+(defn- has-variable-genotypes?
+  "Check that a genotype varies across the experimental conditions."
+  [vc]
+  (> (count (set (map :type (:genotypes vc))))
+     1))
+
+(defn- het-in-one-treatment?
+  "Ensure variant is heterozygous in only one treatment condition"
+  [samples vc]
+  (let [treats (reduce (fn [coll g]
+                         (if (= (:type g) "HET")
+                           (conj coll (get samples (:sample-name g)))
+                           coll))
+                       #{} (:genotypes vc))]
+    (= 1 (count treats))))
+
 ;; ## Localize variants per gene
 
-(defn- vc->gene-names
-  "Extract gene names and sizes from snpEff annotation of variant effects.."
+(defn- parse-snpeff-line
   [vc]
   (letfn [(eff->gene-name [eff]
-            (let [parts (-> eff
+            (let [priorities {"HIGH" 0 "MODERATE" 1 "LOW" 2 "MODIFIER" 3}
+                  parts (-> eff
                             (string/split #"\(")
                             second
                             (string/split #"\|"))
                   size (nth parts 4)]
-              (when-not (empty? size)
-                {:name (nth parts 5) :size (* 3 (Integer/parseInt size))})))]
-    (reduce (fn [coll g]
-              (if g
-                (assoc coll (:name g) (:size g))
-                coll))
-            {} (map eff->gene-name
-                    (let [a (get-in vc [:attributes "EFF"])]
-                      (if (string? a) [a] a))))))
+              {:gene (nth parts 5)
+               :change (first parts)
+               :priority (get priorities (first parts) 4)
+               :codon-change (nth parts 2)
+               :aa-change (nth parts 3)
+               :size (when-not (empty? size) (* 3 (Integer/parseInt size)))}))]
+    (map eff->gene-name
+       (let [a (get-in vc [:attributes "EFF"])]
+         (if (string? a) [a] a)))))
+
+(defn- vc->gene-names
+  "Extract gene names and sizes from snpEff annotation of variant effects.."
+  [vc]
+  (reduce (fn [coll g]
+            (if (:size g)
+              (assoc coll (:gene g) (:size g))
+              coll))
+          {} (parse-snpeff-line vc)))
 
 (defn- update-gene-count
   "Extract gene names effected by variant and update count."
@@ -106,13 +134,27 @@
 
 ;; ## Summarize calls by treatment
 
+(defn- vc->treat-types
+  "Retrieve the treatment and variant call types for a variant"
+  [samples vc]
+  (let [types-by-treat (reduce (fn [coll g]
+                                 (let [k (get samples (:sample-name g))]
+                                   (assoc coll k (conj (get coll k #{}) (:type g)))))
+                               {} (:genotypes vc))]
+    (map (fn [[treat types]]
+              (let [val (cond
+                         (contains? types "HET") "HET"
+                         (contains? types "HOM_REF") "HOM_REF"
+                         (contains? types "HOM_VAR") "HOM_VAR")]
+                [treat (keyword val)]))
+         types-by-treat)))
+
 (defn- vc-treatment-calls
   "Summarize calls by treatment for a variant context."
   [samples orig-coll vc]
-  (reduce (fn [coll g]
-            (let [key [(get samples (:sample-name g)) (keyword (:type g))]]
-              (assoc-in coll key (inc (get-in coll key 0)))))
-          orig-coll (:genotypes vc)))
+  (reduce (fn [coll key]
+            (assoc-in coll key (inc (get-in coll key 0))))
+          orig-coll (vc->treat-types samples vc)))
 
 (defn- print-metrics
   [samples calls-by-treatment]
@@ -139,10 +181,50 @@
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
+           (filter passes-call-rate?)
            (filter has-min-depth?)
+           (filter has-variable-genotypes?)
+           (filter (partial het-in-one-treatment? samples))
            (remove is-high-gene?)
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
            (print-metrics samples)))))
+
+;; ## Summary CSV of calls
+
+(defn- snpeff-effect
+  "Summarize most worrisome effect from snpEff output."
+  [vc]
+  (let [e (first (sort-by :priority (parse-snpeff-line vc)))]
+    (map #(get e %) [:gene :change :codon-change :aa-change])
+    ))
+
+(defn- vc->summary
+  "Covert a variant into a single line CSV-friendly summary."
+  [samples vc]
+  (concat
+   [(:chr vc)
+    (:start vc)
+    (.getBaseString (:ref-allele vc))
+    (string/join ";" (map #(.getBaseString %) (:alt-alleles vc)))
+    (string/join ";" (map first (filter #(= (second %) :HET) (vc->treat-types samples vc))))]
+   (snpeff-effect vc)))
+
+(defn call-summary-csv
+  "Summarize calls into a final CSV for exploration."
+  [vcf-file ref-file config-file is-high-gene?]
+  (let [samples (get-treatment-map vcf-file config-file)
+        out-file (str (itx/file-root vcf-file) "-summary.csv")]
+    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)
+                wtr (io/writer out-file)]
+      (csv/write-csv wtr [["chr" "start" "ref" "alt" "treatment" "gene" "effect" "gene" "codon" "aa"]])
+      (->> (gvc/parse-vcf vcf-iter)
+           (filter passes-call-rate?)
+           (filter has-min-depth?)
+           (filter has-variable-genotypes?)
+           (filter (partial het-in-one-treatment? samples))
+           (remove is-high-gene?)
+           (map (partial vc->summary samples))
+           (csv/write-csv wtr)))))
 
 ;; ## Evaluate replicate consistency
 
@@ -177,7 +259,9 @@
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
+           (filter passes-call-rate?)
            (filter has-min-depth?)
+           (filter has-variable-genotypes?)
            (remove is-high-gene?)
            (reduce (partial evalute-consistency samples) {})
            (print-consistency samples)))))
@@ -187,6 +271,7 @@
   (doseq [vcf-file vcf-files]
     (let [is-high-gene? (check-highly-mutated vcf-file ref-file config-file)]
       (call-metrics vcf-file ref-file config-file is-high-gene?)
+      (call-summary-csv vcf-file ref-file config-file is-high-gene?)
       (consistency-metrics vcf-file ref-file config-file is-high-gene?)
       )))
 
