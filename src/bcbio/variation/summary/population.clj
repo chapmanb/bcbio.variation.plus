@@ -112,6 +112,9 @@
   "Generate predicate function to identify variants in highly mutated genes."
   [vcf-file ref-file config-file]
   (let [high-genes (highly-mutated-genes vcf-file ref-file config-file)]
+    ;; (println "** Highly mutated")
+    ;; (doseq [[k v] high-genes]
+    ;;   (println k v))
     (fn [vc]
       (some (fn [[k v]] (contains? high-genes k))
             (vc->gene-names vc)))))
@@ -184,7 +187,7 @@
            (filter passes-call-rate?)
            (filter has-min-depth?)
            (filter has-variable-genotypes?)
-           (filter (partial het-in-one-treatment? samples))
+           ;(filter (partial het-in-one-treatment? samples))
            (remove is-high-gene?)
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
            (print-metrics samples)))))
@@ -206,8 +209,10 @@
     (:start vc)
     (.getBaseString (:ref-allele vc))
     (string/join ";" (map #(.getBaseString %) (:alt-alleles vc)))
+    (int (stats/mean (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
     (string/join ";" (map first (filter #(= (second %) :HET) (vc->treat-types samples vc))))]
-   (snpeff-effect vc)))
+   (snpeff-effect vc)
+   (map #(:type %) (:genotypes vc))))
 
 (defn call-summary-csv
   "Summarize calls into a final CSV for exploration."
@@ -216,12 +221,13 @@
         out-file (str (itx/file-root vcf-file) "-summary.csv")]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)
                 wtr (io/writer out-file)]
-      (csv/write-csv wtr [["chr" "start" "ref" "alt" "treatment" "gene" "effect" "gene" "codon" "aa"]])
+      (csv/write-csv wtr [(concat ["chr" "start" "ref" "alt" "depth" "treatment" "gene" "effect" "codon" "aa"]
+                                  (-> vcf-file gvc/get-vcf-header .getGenotypeSamples))])
       (->> (gvc/parse-vcf vcf-iter)
            (filter passes-call-rate?)
            (filter has-min-depth?)
            (filter has-variable-genotypes?)
-           (filter (partial het-in-one-treatment? samples))
+           ;(filter (partial het-in-one-treatment? samples))
            (remove is-high-gene?)
            (map (partial vc->summary samples))
            (csv/write-csv wtr)))))
