@@ -21,5 +21,6 @@
            ?form)))
 
 (facts "Calculate ensemble set of variants from multiple inputs using realignment."
-  (let [region {:chrom "10" :start 250000 :end 400000}]
-    (erealign/by-region region vcf-files bam-file ref-file work-dir)))
+  (let [region {:chrom "10" :start 250000 :end 400000}
+        out-file (str (io/file data-dir "work" "10_250000_400000-recall-10_250000_400000.vcf"))]
+    (erealign/by-region region vcf-files bam-file ref-file work-dir) => out-file))
