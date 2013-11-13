@@ -12,6 +12,11 @@
 
 ;; ## Filtering
 
+(defn- passes-filter?
+  "Does variant pass the original GATK filter."
+  [vc]
+  (empty? (:filters vc)))
+
 (defn- passes-call-rate?
   "Check for 100% variant call rate."
   [vc]
@@ -19,8 +24,8 @@
 
 (defn- has-min-depth?
   "Ensure all samples have at least 12x coverage for calling heterozygotes."
-  [vc]
-  (every? #(>= % 12) (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
+  [depth vc]
+  (every? #(>= % depth) (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
 
 (defn- has-variable-genotypes?
   "Check that a genotype varies across the experimental conditions."
@@ -102,11 +107,11 @@
   [vcf-file ref-file config-file]
   (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
     (->> (gvc/parse-vcf vcf-iter)
-           (filter has-min-depth?)
-           (reduce update-gene-count {})
-           (remove low-count?)
-           normalize-counts
-           get-top-genes)))
+         (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
+         (reduce update-gene-count {})
+         (remove low-count?)
+         normalize-counts
+         get-top-genes)))
 
 (defn check-highly-mutated
   "Generate predicate function to identify variants in highly mutated genes."
@@ -134,6 +139,20 @@
   [vcf-file config-file]
   (let [sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)]
     (select-keys (get-sample-treatments config-file) sample-names)))
+
+(defn- get-target-depth
+  "Retrieve desired depth for a set of samples from configuration file.
+   Defaults to heterozygous resolution depth (12)"
+  [vcf-file config-file]
+  (let [config (-> config-file slurp yaml/parse-string)
+        sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)
+        depths (reduce (fn [coll x]
+                         (if-let [depth (get-in x [:metadata :depth])]
+                           (assoc coll (:description x) depth)
+                           coll))
+                       {} (:details config))
+        cur-depths (vals (select-keys depths sample-names))]
+    (if (empty? cur-depths) 12 (apply min cur-depths))))
 
 ;; ## Summarize calls by treatment
 
@@ -177,6 +196,29 @@
     (println (doric/table [:treatment :HOM_REF :HOM_REF-% :HET :HET-% :HOM_VAR :HOM_VAR-%]
                           (map (partial summarize-treat calls-by-treatment) (sort (keys calls-by-treatment)))))))
 
+(defn- print-chromosome-distribution
+  "Table of reads mapped by chromosome."
+  [vcs]
+  (letfn [(gs->het-counts [top-coll vc]
+            (reduce (fn [coll g]
+                      (if (= "HET" (:type g))
+                        (assoc coll (:sample-name g)
+                               (inc (get coll (:sample-name g) 0)))
+                        coll))
+                    top-coll (:genotypes vc)))
+          (chr->sample-counts [chrom samples counts]
+            (reduce (fn [coll s]
+                      (assoc coll s (get-in counts [chrom s] 0)))
+                    {:chr chrom} samples))]
+    (let [counts (reduce (fn [coll vc]
+                           (assoc coll (:chr vc)
+                                  (gs->het-counts (get coll (:chr vc)) vc)))
+                         {} vcs)
+          samples (map :sample-name (:genotypes (first vcs)))]
+      (println (doric/table (cons :chr samples)
+                            (map #(chr->sample-counts % samples counts) (sort (keys counts)))))))
+  vcs)
+
 (defn call-metrics
   "Calculate overall summary call metrics for an input VCF file."
   [vcf-file ref-file config-file is-high-gene?]
@@ -184,11 +226,13 @@
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
+           (filter passes-filter?)
            (filter passes-call-rate?)
-           (filter has-min-depth?)
+           (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
            (filter has-variable-genotypes?)
            ;(filter (partial het-in-one-treatment? samples))
            (remove is-high-gene?)
+           print-chromosome-distribution
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
            (print-metrics samples)))))
 
@@ -225,7 +269,7 @@
                                   (-> vcf-file gvc/get-vcf-header .getGenotypeSamples))])
       (->> (gvc/parse-vcf vcf-iter)
            (filter passes-call-rate?)
-           (filter has-min-depth?)
+           (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
            (filter has-variable-genotypes?)
            ;(filter (partial het-in-one-treatment? samples))
            (remove is-high-gene?)
@@ -266,13 +310,13 @@
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
       (->> (gvc/parse-vcf vcf-iter)
            (filter passes-call-rate?)
-           (filter has-min-depth?)
+           (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
            (filter has-variable-genotypes?)
            (remove is-high-gene?)
            (reduce (partial evalute-consistency samples) {})
            (print-consistency samples)))))
 
-(defn- call-metrics-many
+(defn call-metrics-many
   [config-file ref-file & vcf-files]
   (doseq [vcf-file vcf-files]
     (let [is-high-gene? (check-highly-mutated vcf-file ref-file config-file)]
