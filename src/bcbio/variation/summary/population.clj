@@ -85,7 +85,7 @@
   "Retrieve the top genes with large numbers of mutations, looking for outliers."
   [gcounts]
   (let [counts (sort > (map second gcounts))
-        thresh (stats/quantile 0.20 counts)]
+        thresh (stats/quantile 0.3 counts)]
     (->> gcounts
          (sort-by second >)
          (take-while #(> (second %) thresh))
@@ -102,6 +102,20 @@
   [[_ g]]
   (< (:count g) 5))
 
+(defn- get-target-depth
+  "Retrieve desired depth for a set of samples from configuration file.
+   Defaults to heterozygous resolution depth (12)"
+  [vcf-file config-file]
+  (let [config (-> config-file slurp yaml/parse-string)
+        sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)
+        depths (reduce (fn [coll x]
+                         (if-let [depth (get-in x [:metadata :depth])]
+                           (assoc coll (:description x) depth)
+                           coll))
+                       {} (:details config))
+        cur-depths (vals (select-keys depths sample-names))]
+    (if (empty? cur-depths) 12 (apply min cur-depths))))
+
 (defn highly-mutated-genes
   "Identify genes with large numbers of mutations for filtering purposes."
   [vcf-file ref-file config-file]
@@ -117,9 +131,9 @@
   "Generate predicate function to identify variants in highly mutated genes."
   [vcf-file ref-file config-file]
   (let [high-genes (highly-mutated-genes vcf-file ref-file config-file)]
-    ;; (println "** Highly mutated")
-    ;; (doseq [[k v] high-genes]
-    ;;   (println k v))
+    (println "** Highly mutated")
+    (doseq [[k v] high-genes]
+       (println k v))
     (fn [vc]
       (some (fn [[k v]] (contains? high-genes k))
             (vc->gene-names vc)))))
@@ -139,20 +153,6 @@
   [vcf-file config-file]
   (let [sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)]
     (select-keys (get-sample-treatments config-file) sample-names)))
-
-(defn- get-target-depth
-  "Retrieve desired depth for a set of samples from configuration file.
-   Defaults to heterozygous resolution depth (12)"
-  [vcf-file config-file]
-  (let [config (-> config-file slurp yaml/parse-string)
-        sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)
-        depths (reduce (fn [coll x]
-                         (if-let [depth (get-in x [:metadata :depth])]
-                           (assoc coll (:description x) depth)
-                           coll))
-                       {} (:details config))
-        cur-depths (vals (select-keys depths sample-names))]
-    (if (empty? cur-depths) 12 (apply min cur-depths))))
 
 ;; ## Summarize calls by treatment
 
@@ -242,8 +242,7 @@
   "Summarize most worrisome effect from snpEff output."
   [vc]
   (let [e (first (sort-by :priority (parse-snpeff-line vc)))]
-    (map #(get e %) [:gene :change :codon-change :aa-change])
-    ))
+    (map #(get e %) [:gene :change :codon-change :aa-change])))
 
 (defn- vc->summary
   "Covert a variant into a single line CSV-friendly summary."
@@ -252,9 +251,9 @@
    [(:chr vc)
     (:start vc)
     (.getBaseString (:ref-allele vc))
-    (string/join ";" (map #(.getBaseString %) (:alt-alleles vc)))
+    (string/join "&" (map #(.getBaseString %) (:alt-alleles vc)))
     (int (stats/mean (map #(get-in % [:attributes "DP"]) (:genotypes vc))))
-    (string/join ";" (map first (filter #(= (second %) :HET) (vc->treat-types samples vc))))]
+    (string/join "&" (map first (filter #(= (second %) :HET) (vc->treat-types samples vc))))]
    (snpeff-effect vc)
    (map #(:type %) (:genotypes vc))))
 
