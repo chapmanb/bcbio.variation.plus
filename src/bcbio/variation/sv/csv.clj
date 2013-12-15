@@ -2,6 +2,7 @@
   "Extract structural variations from VCF into flat CSV structure"
   (:require [clojure.data.csv :as csv]
             [clojure.java.io :as io]
+            [bcbio.run.fsp :as fsp]
             [bcbio.run.itx :as itx]
             [bcbio.variation.structural :as structural]
             [bcbio.variation.variantcontext :as gvc]))
@@ -29,7 +30,7 @@
 (defn vcf-convert
   "Convert structural variants in the input file to a flattened CSV."
   [vcf-file ref-file]
-  (let [out-file (str (itx/file-root vcf-file) ".csv")]
+  (let [out-file (str (fsp/file-root vcf-file) ".csv")]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)
                 wtr (io/writer out-file)]
       (csv/write-csv wtr [["sample" "chr" "start" "end" "cnvtype" "cn"]])

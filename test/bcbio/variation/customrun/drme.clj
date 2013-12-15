@@ -1,6 +1,7 @@
 (ns bcbio.variation.customrun.drme
   "Custom code for running top level analysis on mouse exome project."
   (:require [bcbio.variation.summary.population :as pop]
+            [clojure.java.io :as io]
             [me.raynes.fs :as fs]))
 
 (defn run-summary

@@ -1,8 +1,9 @@
-(ns bcbio.variation.erealign
+(ns bcbio.variation.test-erealign
   "Tests for ensemble variant consolidation with local realignment."
   (:require [bcbio.variation.ensemble.realign :as erealign]
             [midje.sweet :refer :all]
             [clojure.java.io :as io]
+            [bcbio.run.fsp :as fsp]
             [bcbio.run.itx :as itx]))
 
 (background
@@ -17,7 +18,7 @@
            (doseq [x (concat [work-dir]
                              (map #(str % ".gz") vcf-files)
                              (map #(str % ".gz.tbi") vcf-files))]
-             (itx/remove-path x))
+             (fsp/remove-path x))
            ?form)))
 
 (facts "Calculate ensemble set of variants from multiple inputs using realignment."

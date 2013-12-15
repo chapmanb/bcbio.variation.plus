@@ -7,6 +7,7 @@
             [criterium.stats :as stats]
             [doric.core :as doric]
             [me.raynes.fs :as fs]
+            [bcbio.run.fsp :as fsp]
             [bcbio.run.itx :as itx]
             [bcbio.variation.variantcontext :as gvc]))
 
@@ -261,7 +262,7 @@
   "Summarize calls into a final CSV for exploration."
   [vcf-file ref-file config-file is-high-gene?]
   (let [samples (get-treatment-map vcf-file config-file)
-        out-file (str (itx/file-root vcf-file) "-summary.csv")]
+        out-file (str (fsp/file-root vcf-file) "-summary.csv")]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)
                 wtr (io/writer out-file)]
       (csv/write-csv wtr [(concat ["chr" "start" "ref" "alt" "depth" "treatment" "gene" "effect" "codon" "aa"]
