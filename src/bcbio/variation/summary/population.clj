@@ -1,5 +1,7 @@
 (ns bcbio.variation.summary.population
   "Summarize variant metrics and extract useful variants for batch called populations."
+  (:import [net.sf.samtools SAMFileReader]
+           [net.sf.picard.util SamLocusIterator IntervalList Interval])
   (:require [clojure.data.csv :as csv]
             [clojure.java.io :as io]
             [clojure.set :as set]
@@ -59,12 +61,21 @@
         cur-depths (vals (select-keys depths sample-names))]
     (if (empty? cur-depths) 12 (apply min cur-depths))))
 
+(defn- get-bam-depth
+  "Attempt at lightweight way to get depth at a position."
+  [bam-file chrom start]
+  (with-open [rdr (SAMFileReader. (io/file bam-file) (io/file (str bam-file ".bai")))
+              sli (.iterator (SamLocusIterator. rdr (doto (IntervalList. (.getFileHeader rdr))
+                                                      (.add (Interval. chrom (inc start) (inc start))))
+                                                true))]
+    (-> sli .next .getRecordAndPositions .size)))
+
 (defn check-evaluation-depth
   "Prepare function that ensures a set of baseline BAM files have minimum depth at a position"
-  [bam-files config-file]
-  (let [depth (get-target-depth config-file)]
+  [bam-files]
+  (let [depth 4]
     (fn [vc]
-      )))
+      (every? #(>= (get-bam-depth % (:chrom vc) (:start vc)) depth) bam-files))))
 
 ;; ## Localize variants per gene
 
@@ -255,7 +266,7 @@
 
 (defn call-metrics
   "Calculate overall summary call metrics for an input VCF file."
-  [vcf-file config-file is-high-gene?]
+  [vcf-file config-file checks]
   (println "**" (fs/base-name vcf-file))
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)]
@@ -265,7 +276,8 @@
            (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
            (filter has-variable-genotypes?)
            ;(filter (partial het-in-one-treatment? samples))
-           (remove is-high-gene?)
+           (remove (:is-high-gene? checks))
+           (filter (:passes-depth? checks))
            print-chromosome-distribution
            (reduce (fn [coll vc] (vc-treatment-calls samples coll vc)) {})
            (print-metrics samples)))))
@@ -293,7 +305,7 @@
 
 (defn call-summary-csv
   "Summarize calls into a final CSV for exploration."
-  [vcf-file config-file is-high-gene?]
+  [vcf-file config-file checks]
   (let [samples (get-treatment-map vcf-file config-file)
         out-file (str (fsp/file-root vcf-file) "-summary.csv")]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)
@@ -305,7 +317,8 @@
            (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
            (filter has-variable-genotypes?)
            ;(filter (partial het-in-one-treatment? samples))
-           (remove is-high-gene?)
+           (remove (:is-high-gene? checks))
+           (filter (:passes-depth? checks))
            (map (partial vc->summary samples))
            (csv/write-csv wtr)))))
 
@@ -338,14 +351,15 @@
 
 (defn consistency-metrics
   "Calculate metrics of consistency of calls amongst replicates."
-  [vcf-file config-file is-high-gene?]
+  [vcf-file config-file checks]
   (let [samples (get-treatment-map vcf-file config-file)]
     (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)]
       (->> (gvc/parse-vcf vcf-iter)
            (filter passes-call-rate?)
            (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
            (filter has-variable-genotypes?)
-           (remove is-high-gene?)
+           (remove (:is-high-gene? checks))
+           (filter (:passes-depth? checks))
            (reduce (partial evalute-consistency samples) {})
            (print-consistency samples)))))
 
@@ -361,13 +375,13 @@
 (defn call-metrics-many
   [config-file cluster-file & support-files]
   (let [{bam-files ".bam" vcf-files ".vcf"} (input-files-by-ext support-files)
-        passes-depth? (check-evaluation-depth bam-files config-file)
         clustered-genes (get-clustered-genes cluster-file)]
     (doseq [vcf-file vcf-files]
-      (let [is-high-gene? (check-highly-mutated vcf-file clustered-genes config-file)]
-        (call-metrics vcf-file config-file is-high-gene?)
-        (call-summary-csv vcf-file config-file is-high-gene?)
-        (consistency-metrics vcf-file config-file is-high-gene?)))))
+      (let [checks {:is-high-gene? (check-highly-mutated vcf-file clustered-genes config-file)
+                    :passes-depth? (check-evaluation-depth bam-files)}]
+        (call-metrics vcf-file config-file checks)
+        (call-summary-csv vcf-file config-file checks)
+        (consistency-metrics vcf-file config-file checks)))))
 
 (defn -main
   [& args]
@@ -382,6 +396,7 @@
   (let [;work-dir "/home/chapmanb/tmp/vcf/mouse"
         work-dir "/home/bchapman/tmp/dr_mouseexome/vcf"
         config-file (str work-dir "/drme-pilot.yaml")
-        vcf-file (str work-dir "/old1-gatk.vcf")]
-    (let [is-high-gene? (check-highly-mutated vcf-file #{} config-file)]
-      (consistency-metrics vcf-file config-file is-high-gene?))))
+        cluster-file (str work-dir "/clustered-paula.csv")
+        vcf-file (str work-dir "/old1-gatk.vcf")
+        bam-file (str work-dir "/1_130622_drme-sort.bam")]
+    (call-metrics-many config-file cluster-file vcf-file bam-file)))
