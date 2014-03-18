@@ -75,7 +75,7 @@
   [bam-files]
   (let [depth 4]
     (fn [vc]
-      (every? #(>= (get-bam-depth % (:chrom vc) (:start vc)) depth) bam-files))))
+      (every? #(>= (get-bam-depth % (:chr vc) (:start vc)) depth) bam-files))))
 
 ;; ## Localize variants per gene
 
@@ -151,12 +151,12 @@
   "Generate predicate function to identify variants in highly mutated genes."
   [vcf-file input-genes config-file]
   (let [high-genes (highly-mutated-genes vcf-file config-file)
-        check-genes (set/union (set (map string/lower-case high-genes)) input-genes)]
+        check-genes (set/union (set (map #(string/lower-case (first %)) high-genes)) input-genes)]
     (println "** Highly mutated")
     (doseq [[k v] high-genes]
        (println k v))
     (fn [vc]
-      (some (fn [[k v]] (contains? high-genes (string/lower-case k)))
+      (some (fn [[k v]] (contains? check-genes (string/lower-case k)))
             (vc->gene-names vc)))))
 
 (defn get-clustered-genes
