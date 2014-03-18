@@ -3,7 +3,7 @@
   :url "https://github.com/chapmanb/bcbio.variation.plus"
   :license {:name "MIT" :url "http://www.opensource.org/licenses/mit-license.html"}
   :dependencies [[org.clojure/clojure "1.5.1"]
-                 [bcbio.variation "0.1.3-SNAPSHOT"]
+                 [bcbio.variation "0.1.5"]
                  ;; GATK dependencies
                  [it.unimi.dsi/fastutil "6.5.3"]]
   :jvm-opts ["-Xms750m" "-Xmx2g"]

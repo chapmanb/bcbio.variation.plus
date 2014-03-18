@@ -44,6 +44,10 @@
                        #{} (:genotypes vc))]
     (= 1 (count treats))))
 
+(def get-evaluation-positions
+  "Retrieve positions with minimum coverage in a set of baseline samples."
+  [vcf-files config-files])
+
 ;; ## Localize variants per gene
 
 (defn- parse-snpeff-line
@@ -119,8 +123,8 @@
 
 (defn highly-mutated-genes
   "Identify genes with large numbers of mutations for filtering purposes."
-  [vcf-file ref-file config-file]
-  (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
+  [vcf-file config-file]
+  (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)]
     (->> (gvc/parse-vcf vcf-iter)
          (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
          (reduce update-gene-count {})
@@ -130,14 +134,18 @@
 
 (defn check-highly-mutated
   "Generate predicate function to identify variants in highly mutated genes."
-  [vcf-file ref-file config-file]
-  (let [high-genes (highly-mutated-genes vcf-file ref-file config-file)]
+  [vcf-file config-file]
+  (let [high-genes (highly-mutated-genes vcf-file config-file)]
     (println "** Highly mutated")
     (doseq [[k v] high-genes]
        (println k v))
     (fn [vc]
       (some (fn [[k v]] (contains? high-genes k))
             (vc->gene-names vc)))))
+
+(defn get-clustered-genes
+  "Retrieve a list of manually identified clustered genes to avoid in summarizing."
+  [cluster-file])
 
 ;; ## Organize samples and treatments
 
@@ -222,10 +230,10 @@
 
 (defn call-metrics
   "Calculate overall summary call metrics for an input VCF file."
-  [vcf-file ref-file config-file is-high-gene?]
+  [vcf-file config-file is-high-gene?]
   (println "**" (fs/base-name vcf-file))
   (let [samples (get-treatment-map vcf-file config-file)]
-    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
+    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)]
       (->> (gvc/parse-vcf vcf-iter)
            (filter passes-filter?)
            (filter passes-call-rate?)
@@ -260,10 +268,10 @@
 
 (defn call-summary-csv
   "Summarize calls into a final CSV for exploration."
-  [vcf-file ref-file config-file is-high-gene?]
+  [vcf-file config-file is-high-gene?]
   (let [samples (get-treatment-map vcf-file config-file)
         out-file (str (fsp/file-root vcf-file) "-summary.csv")]
-    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)
+    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)
                 wtr (io/writer out-file)]
       (csv/write-csv wtr [(concat ["chr" "start" "ref" "alt" "depth" "treatment" "gene" "effect" "codon" "aa"]
                                   (-> vcf-file gvc/get-vcf-header .getGenotypeSamples))])
@@ -305,9 +313,9 @@
 
 (defn consistency-metrics
   "Calculate metrics of consistency of calls amongst replicates."
-  [vcf-file ref-file config-file is-high-gene?]
+  [vcf-file config-file is-high-gene?]
   (let [samples (get-treatment-map vcf-file config-file)]
-    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file ref-file)]
+    (with-open [vcf-iter (gvc/get-vcf-iterator vcf-file)]
       (->> (gvc/parse-vcf vcf-iter)
            (filter passes-call-rate?)
            (filter (partial has-min-depth? (get-target-depth vcf-file config-file)))
@@ -317,13 +325,15 @@
            (print-consistency samples)))))
 
 (defn call-metrics-many
-  [config-file ref-file & vcf-files]
-  (doseq [vcf-file vcf-files]
-    (let [is-high-gene? (check-highly-mutated vcf-file ref-file config-file)]
-      (call-metrics vcf-file ref-file config-file is-high-gene?)
-      (call-summary-csv vcf-file ref-file config-file is-high-gene?)
-      (consistency-metrics vcf-file ref-file config-file is-high-gene?)
-      )))
+  [config-file cluster-file & vcf-files]
+  (let [eval-positions (get-evaluation-positions vcf-files config-file)
+        clustered-genes (get-clustered-genes cluster-file)]
+    (doseq [vcf-file vcf-files]
+      (let [is-high-gene? (check-highly-mutated vcf-file config-file)]
+        (call-metrics vcf-file config-file is-high-gene?)
+        (call-summary-csv vcf-file config-file is-high-gene?)
+        (consistency-metrics vcf-file config-file is-high-gene?)
+        ))))
 
 (defn -main
   [& args]
@@ -331,13 +341,13 @@
     (apply call-metrics-many args)
     (do
       (println "Usage:")
-      (println "  pop-summary <config-file> <ref-file> <vcf-files>"))))
+      (println "  pop-summary <config-file> <cluster-file> <vcf-files>"))))
 
 (defn- tester
   []
   (let [work-dir "/home/chapmanb/tmp/vcf/mouse"
-        work-dir "/home/bchapman/tmp/dr_mouseexome/vcf"
-        ref-file "/usr/local/share/bcbio_nextgen/genomes/mm10/seq/mm10.fa"
+        ;work-dir "/home/bchapman/tmp/dr_mouseexome/vcf"
         config-file (str work-dir "/drme-pilot.yaml")
         vcf-file (str work-dir "/old1-gatk.vcf")]
-    (consistency-metrics vcf-file ref-file config-file)))
+    (let [is-high-gene? (check-highly-mutated vcf-file config-file)]
+      (consistency-metrics vcf-file config-file is-high-gene?))))
