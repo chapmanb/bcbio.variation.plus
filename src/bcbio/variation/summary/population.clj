@@ -2,6 +2,7 @@
   "Summarize variant metrics and extract useful variants for batch called populations."
   (:require [clojure.data.csv :as csv]
             [clojure.java.io :as io]
+            [clojure.set :as set]
             [clojure.string :as string]
             [clj-yaml.core :as yaml]
             [criterium.stats :as stats]
@@ -44,9 +45,26 @@
                        #{} (:genotypes vc))]
     (= 1 (count treats))))
 
-(def get-evaluation-positions
-  "Retrieve positions with minimum coverage in a set of baseline samples."
-  [vcf-files config-files])
+(defn- get-target-depth
+  "Retrieve desired depth for a set of samples from configuration file.
+   Defaults to heterozygous resolution depth (12)"
+  [vcf-file config-file]
+  (let [config (-> config-file slurp yaml/parse-string)
+        sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)
+        depths (reduce (fn [coll x]
+                         (if-let [depth (get-in x [:metadata :depth])]
+                           (assoc coll (:description x) depth)
+                           coll))
+                       {} (:details config))
+        cur-depths (vals (select-keys depths sample-names))]
+    (if (empty? cur-depths) 12 (apply min cur-depths))))
+
+(defn check-evaluation-depth
+  "Prepare function that ensures a set of baseline BAM files have minimum depth at a position"
+  [bam-files config-file]
+  (let [depth (get-target-depth config-file)]
+    (fn [vc]
+      )))
 
 ;; ## Localize variants per gene
 
@@ -107,20 +125,6 @@
   [[_ g]]
   (< (:count g) 5))
 
-(defn- get-target-depth
-  "Retrieve desired depth for a set of samples from configuration file.
-   Defaults to heterozygous resolution depth (12)"
-  [vcf-file config-file]
-  (let [config (-> config-file slurp yaml/parse-string)
-        sample-names (-> vcf-file gvc/get-vcf-header .getGenotypeSamples vec)
-        depths (reduce (fn [coll x]
-                         (if-let [depth (get-in x [:metadata :depth])]
-                           (assoc coll (:description x) depth)
-                           coll))
-                       {} (:details config))
-        cur-depths (vals (select-keys depths sample-names))]
-    (if (empty? cur-depths) 12 (apply min cur-depths))))
-
 (defn highly-mutated-genes
   "Identify genes with large numbers of mutations for filtering purposes."
   [vcf-file config-file]
@@ -134,18 +138,39 @@
 
 (defn check-highly-mutated
   "Generate predicate function to identify variants in highly mutated genes."
-  [vcf-file config-file]
-  (let [high-genes (highly-mutated-genes vcf-file config-file)]
+  [vcf-file input-genes config-file]
+  (let [high-genes (highly-mutated-genes vcf-file config-file)
+        check-genes (set/union (set (map string/lower-case high-genes)) input-genes)]
     (println "** Highly mutated")
     (doseq [[k v] high-genes]
        (println k v))
     (fn [vc]
-      (some (fn [[k v]] (contains? high-genes k))
+      (some (fn [[k v]] (contains? high-genes (string/lower-case k)))
             (vc->gene-names vc)))))
 
 (defn get-clustered-genes
   "Retrieve a list of manually identified clustered genes to avoid in summarizing."
-  [cluster-file])
+  [fname]
+  (letfn [(find-gene-coords [parts]
+            (->> parts
+                 (map-indexed (fn [i x] (when (= x "gene") i)))
+                 (remove nil?)))
+          (get-genes [parts coords]
+            (when (seq (filter #(.startsWith % "chr") parts))
+              (->> coords
+                   (map #(nth parts %))
+                   (map string/lower-case)
+                   (remove empty?)
+                   set)))]
+    (with-open [reader (io/reader fname)]
+      (-> (reduce (fn [coll parts]
+                    (cond
+                     (= "chr" (first parts)) (assoc coll :gene-coords (find-gene-coords parts))
+                     (:gene-coords coll) (assoc coll :genes (set/union (:genes coll)
+                                                                       (get-genes parts (:gene-coords coll))))
+                     :else coll))
+                  {:gene-coords nil :genes #{}} (csv/read-csv reader))
+          :genes))))
 
 ;; ## Organize samples and treatments
 
@@ -324,16 +349,25 @@
            (reduce (partial evalute-consistency samples) {})
            (print-consistency samples)))))
 
+(defn- input-files-by-ext
+  "Split input files by file extensions."
+  [fs]
+  (reduce (fn [coll f]
+            (let [ext (fs/extension f)]
+              (assoc coll ext
+                     (cons f (get coll ext [])))))
+          {} fs))
+
 (defn call-metrics-many
-  [config-file cluster-file & vcf-files]
-  (let [eval-positions (get-evaluation-positions vcf-files config-file)
+  [config-file cluster-file & support-files]
+  (let [{bam-files ".bam" vcf-files ".vcf"} (input-files-by-ext support-files)
+        passes-depth? (check-evaluation-depth bam-files config-file)
         clustered-genes (get-clustered-genes cluster-file)]
     (doseq [vcf-file vcf-files]
-      (let [is-high-gene? (check-highly-mutated vcf-file config-file)]
+      (let [is-high-gene? (check-highly-mutated vcf-file clustered-genes config-file)]
         (call-metrics vcf-file config-file is-high-gene?)
         (call-summary-csv vcf-file config-file is-high-gene?)
-        (consistency-metrics vcf-file config-file is-high-gene?)
-        ))))
+        (consistency-metrics vcf-file config-file is-high-gene?)))))
 
 (defn -main
   [& args]
@@ -341,13 +375,13 @@
     (apply call-metrics-many args)
     (do
       (println "Usage:")
-      (println "  pop-summary <config-file> <cluster-file> <vcf-files>"))))
+      (println "  pop-summary <config-file> <cluster-file> <vcf-and-bam-files>"))))
 
 (defn- tester
   []
-  (let [work-dir "/home/chapmanb/tmp/vcf/mouse"
-        ;work-dir "/home/bchapman/tmp/dr_mouseexome/vcf"
+  (let [;work-dir "/home/chapmanb/tmp/vcf/mouse"
+        work-dir "/home/bchapman/tmp/dr_mouseexome/vcf"
         config-file (str work-dir "/drme-pilot.yaml")
         vcf-file (str work-dir "/old1-gatk.vcf")]
-    (let [is-high-gene? (check-highly-mutated vcf-file config-file)]
+    (let [is-high-gene? (check-highly-mutated vcf-file #{} config-file)]
       (consistency-metrics vcf-file config-file is-high-gene?))))
